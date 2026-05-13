@@ -99,6 +99,10 @@ defmodule SymphonyElixir.TestSupport do
           tracker_assignee: nil,
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
+          tracker_github_repo: nil,
+          tracker_require_github_attachment: false,
+          tracker_required_github_labels: [],
+          tracker_blocked_github_labels: [],
           poll_interval_ms: 30_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           max_concurrent_agents: 10,
@@ -134,6 +138,10 @@ defmodule SymphonyElixir.TestSupport do
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
+    tracker_github_repo = Keyword.get(config, :tracker_github_repo)
+    tracker_require_github_attachment = Keyword.get(config, :tracker_require_github_attachment)
+    tracker_required_github_labels = Keyword.get(config, :tracker_required_github_labels)
+    tracker_blocked_github_labels = Keyword.get(config, :tracker_blocked_github_labels)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -170,6 +178,10 @@ defmodule SymphonyElixir.TestSupport do
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
+        "  github_repo: #{yaml_value(tracker_github_repo)}",
+        "  require_github_attachment: #{yaml_value(tracker_require_github_attachment)}",
+        "  required_github_labels: #{yaml_value(tracker_required_github_labels)}",
+        "  blocked_github_labels: #{yaml_value(tracker_blocked_github_labels)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",

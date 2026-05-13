@@ -321,6 +321,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         "id" => "user-1"
       },
       "labels" => %{"nodes" => [%{"name" => "Backend"}]},
+      "attachments" => %{
+        "nodes" => [
+          %{
+            "title" => "GitHub #1502",
+            "subtitle" => "Source issue",
+            "url" => "https://github.com/h3ro-dev/NewRewards/issues/1502",
+            "sourceType" => "github"
+          }
+        ]
+      },
       "inverseRelations" => %{
         "nodes" => [
           %{
@@ -353,6 +363,117 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.state == "Todo"
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
+
+    assert issue.attachments == [
+             %{
+               title: "GitHub #1502",
+               subtitle: "Source issue",
+               url: "https://github.com/h3ro-dev/NewRewards/issues/1502",
+               source_type: "github"
+             }
+           ]
+  end
+
+  test "github label gate allows exactly linked open issue with required labels" do
+    issue = %Issue{
+      identifier: "UTL-1",
+      title: "Run source issue",
+      attachments: [%{url: "https://github.com/h3ro-dev/NewRewards/issues/1502"}]
+    }
+
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready"],
+      blocked_github_labels: ["do-not-agent", "owner:manual"]
+    }
+
+    view_fun = fn "h3ro-dev/NewRewards", 1502 ->
+      {:ok,
+       %{
+         "number" => 1502,
+         "state" => "OPEN",
+         "labels" => [%{"name" => "symphony-ready"}, %{"name" => "codex"}]
+       }}
+    end
+
+    assert {:ok, %{"number" => 1502}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, view_fun)
+  end
+
+  test "github label gate rejects missing and blocked labels before dispatch" do
+    issue = %Issue{
+      identifier: "UTL-2",
+      title: "Run source issue",
+      attachments: [%{url: "https://github.com/h3ro-dev/NewRewards/issues/1503"}]
+    }
+
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready"],
+      blocked_github_labels: ["owner:fourth-clone"]
+    }
+
+    missing_label_view = fn _repo, 1503 ->
+      {:ok, %{"number" => 1503, "state" => "OPEN", "labels" => [%{"name" => "codex"}]}}
+    end
+
+    assert {:error, {:missing_required_github_labels, ["symphony-ready"]}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, missing_label_view)
+
+    blocked_label_view = fn _repo, 1503 ->
+      {:ok,
+       %{
+         "number" => 1503,
+         "state" => "OPEN",
+         "labels" => [%{"name" => "symphony-ready"}, %{"name" => "owner:fourth-clone"}]
+       }}
+    end
+
+    assert {:error, {:blocked_github_labels_present, ["owner:fourth-clone"]}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, blocked_label_view)
+  end
+
+  test "github label gate requires one linked github issue" do
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready"],
+      blocked_github_labels: []
+    }
+
+    missing = %Issue{identifier: "UTL-3", title: "No source"}
+
+    assert {:error, :missing_github_issue_link} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(missing, tracker, fn _, _ -> flunk("unexpected") end)
+
+    multiple = %Issue{
+      identifier: "UTL-4",
+      title: "Two sources",
+      attachments: [
+        %{url: "https://github.com/h3ro-dev/NewRewards/issues/1502"},
+        %{url: "https://github.com/h3ro-dev/NewRewards/issues/1503"}
+      ]
+    }
+
+    assert {:error, {:multiple_github_issue_links, [1502, 1503]}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(multiple, tracker, fn _, _ -> flunk("unexpected") end)
+  end
+
+  test "github label gate can require a Linear attachment instead of text refs" do
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      require_github_attachment: true,
+      required_github_labels: ["symphony-ready"],
+      blocked_github_labels: []
+    }
+
+    issue = %Issue{
+      identifier: "UTL-5",
+      title: "Run #1502",
+      description: "Source https://github.com/h3ro-dev/NewRewards/issues/1502"
+    }
+
+    assert {:error, :missing_github_issue_attachment} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, fn _, _ -> flunk("unexpected") end)
   end
 
   test "linear client marks explicitly unassigned issues as not routed to worker" do
@@ -955,6 +1076,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.max_concurrent_agents_for_state("In Review") == 2
     assert Config.max_concurrent_agents_for_state("Closed") == 10
     assert Config.max_concurrent_agents_for_state(:not_a_string) == 10
+  end
+
+  test "config supports github label gate settings" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_github_repo: "h3ro-dev/NewRewards",
+      tracker_require_github_attachment: true,
+      tracker_required_github_labels: ["symphony-ready"],
+      tracker_blocked_github_labels: ["do-not-agent", "owner:manual"]
+    )
+
+    assert Config.settings!().tracker.github_repo == "h3ro-dev/NewRewards"
+    assert Config.settings!().tracker.require_github_attachment == true
+    assert Config.settings!().tracker.required_github_labels == ["symphony-ready"]
+    assert Config.settings!().tracker.blocked_github_labels == ["do-not-agent", "owner:manual"]
+    assert :ok = Config.validate!()
+  end
+
+  test "config rejects github label gate without repository" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_github_labels: ["symphony-ready"]
+    )
+
+    assert {:error, :missing_github_repo_for_label_gate} = Config.validate!()
   end
 
   test "schema helpers cover custom type and state limit validation" do

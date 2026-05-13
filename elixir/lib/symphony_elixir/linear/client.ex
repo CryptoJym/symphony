@@ -31,6 +31,14 @@ defmodule SymphonyElixir.Linear.Client do
             name
           }
         }
+        attachments(first: $relationFirst) {
+          nodes {
+            title
+            subtitle
+            url
+            sourceType
+          }
+        }
         inverseRelations(first: $relationFirst) {
           nodes {
             type
@@ -74,6 +82,14 @@ defmodule SymphonyElixir.Linear.Client do
         labels {
           nodes {
             name
+          }
+        }
+        attachments(first: $relationFirst) {
+          nodes {
+            title
+            subtitle
+            url
+            sourceType
           }
         }
         inverseRelations(first: $relationFirst) {
@@ -459,6 +475,7 @@ defmodule SymphonyElixir.Linear.Client do
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
       blocked_by: extract_blockers(issue),
+      attachments: extract_attachments(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),
@@ -546,6 +563,21 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_labels(_), do: []
+
+  defp extract_attachments(%{"attachments" => %{"nodes" => attachments}}) when is_list(attachments) do
+    attachments
+    |> Enum.filter(&is_map/1)
+    |> Enum.map(fn attachment ->
+      %{
+        title: attachment["title"],
+        subtitle: attachment["subtitle"],
+        url: attachment["url"],
+        source_type: attachment["sourceType"]
+      }
+    end)
+  end
+
+  defp extract_attachments(_), do: []
 
   defp extract_blockers(%{"inverseRelations" => %{"nodes" => inverse_relations}})
        when is_list(inverse_relations) do

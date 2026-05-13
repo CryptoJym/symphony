@@ -108,7 +108,8 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+    assert Map.get(hooks, "before_remove") =~ "gh pr close"
+    assert Map.get(hooks, "before_remove") =~ "entered a terminal state without merge"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())

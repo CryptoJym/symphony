@@ -127,6 +127,11 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
         {:error, :missing_linear_project_slug}
 
+      settings.tracker.kind == "linear" and
+        settings.tracker.required_github_labels != [] and
+          not is_binary(settings.tracker.github_repo) ->
+        {:error, :missing_github_repo_for_label_gate}
+
       true ->
         :ok
     end
@@ -145,6 +150,9 @@ defmodule SymphonyElixir.Config do
 
       :workflow_front_matter_not_a_map ->
         "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
+
+      :missing_github_repo_for_label_gate ->
+        "GitHub label gate requires tracker.github_repo when tracker.required_github_labels is set"
 
       other ->
         "Invalid WORKFLOW.md config: #{inspect(other)}"
