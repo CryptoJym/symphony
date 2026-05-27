@@ -108,11 +108,12 @@ defmodule SymphonyElixir.GitHubGate do
 
   defp source_issue_number(issue, repo, require_attachment?) do
     attachment_numbers = extract_attachment_numbers(issue, repo)
+    explicit_source_numbers = extract_explicit_source_numbers(issue, repo)
 
     numbers =
       case {attachment_numbers, require_attachment?} do
         {[], true} -> []
-        {[], false} -> extract_text_numbers(issue, repo)
+        {[], false} -> pick_non_empty(explicit_source_numbers, extract_text_numbers(issue, repo))
         {numbers, _require_attachment?} -> numbers
       end
       |> Enum.uniq()
@@ -136,11 +137,47 @@ defmodule SymphonyElixir.GitHubGate do
 
   defp extract_attachment_numbers(_issue, _repo), do: []
 
+  defp extract_explicit_source_numbers(%Issue{} = issue, repo) do
+    issue.description
+    |> source_text_fragments()
+    |> Enum.flat_map(fn text ->
+      extract_repo_url_numbers(text, repo) ++
+        extract_repo_hash_numbers(text, repo) ++
+        extract_hash_numbers(text)
+    end)
+  end
+
+  defp source_text_fragments(text) when is_binary(text) do
+    source_section_fragments(text) ++ source_line_fragments(text) ++ source_marker_fragments(text)
+  end
+
+  defp source_text_fragments(_text), do: []
+
+  defp source_section_fragments(text) do
+    ~r/(?:^|\n)[#]{1,6}\s+Source GitHub Issue\s*\n(?<body>.*?)(?=\n[#]{1,6}\s|\z)/isu
+    |> Regex.scan(text, capture: ["body"])
+    |> List.flatten()
+  end
+
+  defp source_line_fragments(text) do
+    ~r/(?:^|\n)\s*(?:[-*]\s*)?(?:Source GitHub Issue|Source issue)\s*:\s*(?<body>[^\n]+)/iu
+    |> Regex.scan(text, capture: ["body"])
+    |> List.flatten()
+  end
+
+  defp source_marker_fragments(text) do
+    ~r/<!--\s*symphony-source:(?<body>[^>]+?)\s*-->/iu
+    |> Regex.scan(text, capture: ["body"])
+    |> List.flatten()
+  end
+
   defp extract_text_numbers(%Issue{} = issue, repo) do
     [issue.title, issue.description]
     |> Enum.filter(&is_binary/1)
     |> Enum.flat_map(fn text ->
-      extract_repo_url_numbers(text, repo) ++ extract_hash_numbers(text)
+      extract_repo_url_numbers(text, repo) ++
+        extract_repo_hash_numbers(text, repo) ++
+        extract_hash_numbers(text)
     end)
   end
 
@@ -153,11 +190,23 @@ defmodule SymphonyElixir.GitHubGate do
     |> Enum.map(fn [_match, number] -> String.to_integer(number) end)
   end
 
+  defp extract_repo_hash_numbers(text, repo) when is_binary(text) and is_binary(repo) do
+    escaped_repo = Regex.escape(repo)
+    regex = ~r/(?:^|[^\w\/-])#{escaped_repo}#(\d{1,6})(?:\b|[)\]}.,;:\s])/iu
+
+    regex
+    |> Regex.scan(text)
+    |> Enum.map(fn [_match, number] -> String.to_integer(number) end)
+  end
+
   defp extract_hash_numbers(text) when is_binary(text) do
     ~r/(?:^|[\s([{])#(\d{1,6})(?:\b|[)\]}.,;:])/u
     |> Regex.scan(text)
     |> Enum.map(fn [_match, number] -> String.to_integer(number) end)
   end
+
+  defp pick_non_empty([], fallback), do: fallback
+  defp pick_non_empty(values, _fallback), do: values
 
   defp github_issue_open?(%{"state" => state}) when is_binary(state) do
     if String.downcase(state) == "open", do: :ok, else: {:error, {:github_issue_not_open, state}}

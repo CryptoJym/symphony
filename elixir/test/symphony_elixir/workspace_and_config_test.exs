@@ -558,6 +558,38 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              end)
   end
 
+  test "github label gate prefers explicit source issue over related context links" do
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready", "owner:symphony"],
+      blocked_github_labels: []
+    }
+
+    issue = %Issue{
+      identifier: "UTL-10A",
+      title: "GH #1800: promoted issue",
+      description: """
+      <!-- symphony-source:h3ro-dev/NewRewards#1800 -->
+      ## Source GitHub Issue
+      https://github.com/h3ro-dev/NewRewards/issues/1800
+
+      ## Related Links
+      - https://github.com/h3ro-dev/NewRewards/issues/1801
+      - #1802
+      """
+    }
+
+    assert {:ok, %{"number" => 1800}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, fn "h3ro-dev/NewRewards", 1800 ->
+               {:ok,
+                %{
+                  "number" => 1800,
+                  "state" => "open",
+                  "labels" => [%{"name" => "symphony-ready"}, %{"name" => "owner:symphony"}]
+                }}
+             end)
+  end
+
   test "github label gate reports missing state and gh cli outcomes" do
     tracker = %{
       github_repo: "h3ro-dev/NewRewards",
