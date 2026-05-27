@@ -106,8 +106,6 @@ defmodule SymphonyElixir.GitHubGate do
     Map.get(tracker, :require_github_attachment) == true
   end
 
-  defp require_github_attachment?(_tracker), do: false
-
   defp source_issue_number(issue, repo, require_attachment?) do
     attachment_numbers = extract_attachment_numbers(issue, repo)
 
@@ -155,8 +153,6 @@ defmodule SymphonyElixir.GitHubGate do
     |> Enum.map(fn [_match, number] -> String.to_integer(number) end)
   end
 
-  defp extract_repo_url_numbers(_text, _repo), do: []
-
   defp extract_hash_numbers(text) when is_binary(text) do
     ~r/(?:^|[\s([{])#(\d{1,6})(?:\b|[)\]}.,;:])/u
     |> Regex.scan(text)
@@ -169,9 +165,10 @@ defmodule SymphonyElixir.GitHubGate do
 
   defp github_issue_open?(_issue), do: {:error, :github_issue_missing_state}
 
+  @spec required_labels_present?(map(), [String.t()]) :: :ok | {:error, {:missing_required_github_labels, [String.t()]}}
   defp required_labels_present?(github_issue, required_labels) do
     labels = github_issue_labels(github_issue)
-    missing = Enum.reject(required_labels, &MapSet.member?(labels, &1))
+    missing = Enum.reject(required_labels, &(&1 in labels))
 
     case missing do
       [] -> :ok
@@ -179,9 +176,10 @@ defmodule SymphonyElixir.GitHubGate do
     end
   end
 
+  @spec blocked_labels_absent?(map(), [String.t()]) :: :ok | {:error, {:blocked_github_labels_present, [String.t()]}}
   defp blocked_labels_absent?(github_issue, blocked_labels) do
     labels = github_issue_labels(github_issue)
-    present = Enum.filter(blocked_labels, &MapSet.member?(labels, &1))
+    present = Enum.filter(blocked_labels, &(&1 in labels))
 
     case present do
       [] -> :ok
@@ -189,6 +187,7 @@ defmodule SymphonyElixir.GitHubGate do
     end
   end
 
+  @spec github_issue_labels(map()) :: [String.t()]
   defp github_issue_labels(%{"labels" => labels}) when is_list(labels) do
     labels
     |> Enum.map(fn
@@ -198,10 +197,10 @@ defmodule SymphonyElixir.GitHubGate do
       _ -> nil
     end)
     |> Enum.reject(&is_nil/1)
-    |> MapSet.new()
+    |> Enum.uniq()
   end
 
-  defp github_issue_labels(_issue), do: MapSet.new()
+  defp github_issue_labels(_issue), do: []
 
   defp view_issue(repo, issue_number) when is_binary(repo) and is_integer(issue_number) do
     {output, status} =

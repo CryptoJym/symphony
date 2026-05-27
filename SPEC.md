@@ -355,6 +355,20 @@ Fields:
   - Default: `Todo`, `In Progress`
 - `terminal_states` (list of strings)
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
+- `github_repo` (string, optional)
+  - Repository in `owner/name` form for an optional GitHub source-issue gate.
+- `require_github_attachment` (boolean)
+  - Default: `false`.
+  - When true, the GitHub source issue must be present as a tracker attachment rather than only in
+    issue text.
+- `required_github_labels` (list of strings)
+  - Default: empty.
+  - When non-empty with `github_repo`, dispatch requires exactly one linked open GitHub issue with
+    every listed label.
+- `blocked_github_labels` (list of strings)
+  - Default: empty.
+  - When the GitHub source-issue gate is enabled, dispatch is blocked if the linked GitHub issue has
+    any listed label.
 
 #### 5.3.2 `polling` (object)
 
@@ -707,6 +721,11 @@ An issue is dispatch-eligible only if all are true:
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
+- Optional source-issue gate passes when configured:
+  - exactly one source GitHub issue is linked from the tracker issue;
+  - the source GitHub issue is open;
+  - every configured required GitHub label is present;
+  - no configured blocked GitHub label is present.
 - Blocker rule for `Todo` state passes:
   - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
 
@@ -1184,6 +1203,7 @@ Candidate issue normalization should produce fields listed in Section 4.1.1.
 Additional normalization details:
 
 - `labels` -> lowercase strings
+- `attachments` -> tracker attachment maps including at least URL when the tracker provides them
 - `blocked_by` -> derived from inverse relations where relation type is `blocks`
 - `priority` -> integer only (non-integers become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps

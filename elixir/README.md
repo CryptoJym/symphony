@@ -90,6 +90,12 @@ Minimal example:
 tracker:
   kind: linear
   project_slug: "..."
+  # Optional: require a linked GitHub issue before dispatch.
+  github_repo: "your-org/your-repo"
+  required_github_labels:
+    - symphony-ready
+  blocked_github_labels:
+    - do-not-agent
 workspace:
   root: ~/code/workspaces
 hooks:
@@ -128,6 +134,13 @@ Notes:
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- `tracker.github_repo` plus `tracker.required_github_labels` enables a scheduler-level GitHub
+  issue gate. When enabled, each candidate Linear issue must link to exactly one open GitHub issue
+  in that repository, the GitHub issue must include every required label, and it must not include
+  any `tracker.blocked_github_labels`.
+- `tracker.require_github_attachment: true` requires the source GitHub issue to appear as a Linear
+  attachment. When false, Symphony also accepts a full GitHub issue URL or `#123` reference in the
+  Linear title or description.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the

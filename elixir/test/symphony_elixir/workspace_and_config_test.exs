@@ -476,6 +476,164 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, fn _, _ -> flunk("unexpected") end)
   end
 
+  test "github label gate covers disabled, malformed, and non-issue paths" do
+    refute SymphonyElixir.GitHubGate.enabled?(:not_a_tracker)
+    refute SymphonyElixir.GitHubGate.enabled?(%{github_repo: " ", required_github_labels: ["symphony-ready"]})
+    refute SymphonyElixir.GitHubGate.enabled?(%{github_repo: "h3ro-dev/NewRewards", required_github_labels: [" ", 123]})
+
+    assert {:ok, %{gate: :disabled}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(
+               %Issue{identifier: "UTL-6"},
+               %{github_repo: "h3ro-dev/NewRewards", required_github_labels: []},
+               fn _, _ -> flunk("unexpected") end
+             )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_github_repo: "h3ro-dev/NewRewards",
+      tracker_required_github_labels: ["symphony-ready"]
+    )
+
+    assert SymphonyElixir.GitHubGate.enabled?()
+    refute SymphonyElixir.GitHubGate.allowed?(:not_an_issue)
+
+    log =
+      capture_log(fn ->
+        refute SymphonyElixir.GitHubGate.allowed?(%Issue{identifier: "UTL-7", title: "No source"})
+      end)
+
+    assert log =~ "GitHub gate failed :missing_github_issue_link"
+  end
+
+  test "github label gate extracts text, attachment variants, and label shapes" do
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready", "owner:symphony"],
+      blocked_github_labels: ["do-not-agent"]
+    }
+
+    attachment_issue = %Issue{
+      identifier: "UTL-8",
+      title: "Attachment source",
+      attachments: [
+        %{"url" => "https://github.com/h3ro-dev/NewRewards/issues/1600"},
+        %{ignored: true}
+      ]
+    }
+
+    attachment_view = fn "h3ro-dev/NewRewards", 1600 ->
+      {:ok,
+       %{
+         "state" => "open",
+         "labels" => [
+           %{name: "symphony-ready"},
+           "owner:symphony",
+           %{unexpected: true}
+         ]
+       }}
+    end
+
+    assert {:ok, _github_issue} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(attachment_issue, tracker, attachment_view)
+
+    text_issue = %Issue{
+      identifier: "UTL-9",
+      title: "Text source #1601",
+      description: "Source https://github.com/h3ro-dev/NewRewards/issues/1601"
+    }
+
+    assert {:ok, _github_issue} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(text_issue, tracker, fn "h3ro-dev/NewRewards", 1601 ->
+               {:ok, %{"state" => "open", "labels" => [%{"name" => "symphony-ready"}, %{"name" => "owner:symphony"}]}}
+             end)
+
+    hash_issue = %Issue{
+      identifier: "UTL-10",
+      title: "Text source #1602",
+      attachments: nil
+    }
+
+    assert {:ok, _github_issue} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(hash_issue, tracker, fn "h3ro-dev/NewRewards", 1602 ->
+               {:ok, %{"state" => "open", "labels" => [%{"name" => "symphony-ready"}, %{"name" => "owner:symphony"}]}}
+             end)
+  end
+
+  test "github label gate reports missing state and gh cli outcomes" do
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready"],
+      blocked_github_labels: []
+    }
+
+    issue = %Issue{
+      identifier: "UTL-11",
+      title: "Source",
+      description: "https://github.com/h3ro-dev/NewRewards/issues/1700"
+    }
+
+    assert {:error, :github_issue_missing_state} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, fn _, 1700 ->
+               {:ok, %{"labels" => [%{"name" => "symphony-ready"}]}}
+             end)
+
+    assert {:error, {:missing_required_github_labels, ["symphony-ready"]}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, fn _, 1700 ->
+               {:ok, %{"state" => "open"}}
+             end)
+
+    fake_bin = Path.join(System.tmp_dir!(), "symphony-fake-gh-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(fake_bin)
+    fake_gh = Path.join(fake_bin, "gh")
+
+    File.write!(fake_gh, """
+    #!/bin/sh
+    case "$3" in
+      1701) printf '%s' '{"number":1701,"state":"OPEN","labels":[{"name":"symphony-ready"}]}' ;;
+      1702) printf '%s\\n' 'missing issue'; exit 1 ;;
+      1703) printf '%s' '{not-json' ;;
+      *) printf '%s\\n' 'unexpected issue'; exit 2 ;;
+    esac
+    """)
+
+    File.chmod!(fake_gh, 0o755)
+    previous_path = System.get_env("PATH") || ""
+    on_exit(fn -> System.put_env("PATH", previous_path) end)
+    System.put_env("PATH", fake_bin <> ":" <> previous_path)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_github_repo: "h3ro-dev/NewRewards",
+      tracker_required_github_labels: ["symphony-ready"]
+    )
+
+    assert {:ok, %{"number" => 1701}} =
+             SymphonyElixir.GitHubGate.issue_allowed?(%Issue{
+               identifier: "UTL-12",
+               title: "#1701"
+             })
+
+    assert {:error, {:gh_issue_view_failed, "missing issue"}} =
+             SymphonyElixir.GitHubGate.issue_allowed?(%Issue{
+               identifier: "UTL-13",
+               title: "#1702"
+             })
+
+    assert {:error, %Jason.DecodeError{}} =
+             SymphonyElixir.GitHubGate.issue_allowed?(%Issue{
+               identifier: "UTL-14",
+               title: "#1703"
+             })
+
+    System.put_env("PATH", fake_bin <> "/missing")
+
+    assert {:error, {:gh_issue_view_failed, message}} =
+             SymphonyElixir.GitHubGate.issue_allowed?(%Issue{
+               identifier: "UTL-15",
+               title: "#1701"
+             })
+
+    assert message =~ "enoent"
+  end
+
   test "linear client marks explicitly unassigned issues as not routed to worker" do
     raw_issue = %{
       "id" => "issue-99",
