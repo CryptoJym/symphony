@@ -56,6 +56,43 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Path.basename(first_workspace) == "MT_Det"
   end
 
+  test "workspace writes issue manifest and exposes issue metadata to hooks" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-issue-context-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "printf '%s|%s|%s|%s|%s' \"$SYMPHONY_ISSUE_ID\" \"$SYMPHONY_ISSUE_IDENTIFIER\" \"$SYMPHONY_ISSUE_TITLE\" \"$SYMPHONY_ISSUE_STATE\" \"$SYMPHONY_ISSUE_URL\" > hook-env.txt"
+      )
+
+      issue = %Issue{
+        id: "issue-42",
+        identifier: "MT-42",
+        title: "Expose hook context",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-42"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert File.read!(Path.join(workspace, "hook-env.txt")) ==
+               "issue-42|MT-42|Expose hook context|In Progress|https://example.org/issues/MT-42"
+
+      manifest = Path.join([workspace, ".symphony", "issue.json"]) |> File.read!() |> Jason.decode!()
+
+      assert manifest["issue_id"] == "issue-42"
+      assert manifest["issue_identifier"] == "MT-42"
+      assert manifest["title"] == "Expose hook context"
+      assert manifest["state"] == "In Progress"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace reuses existing issue directory without deleting local changes" do
     workspace_root =
       Path.join(
@@ -86,7 +123,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert File.read!(Path.join(second_workspace, "local-progress.txt")) == "in progress\n"
       assert File.read!(Path.join([second_workspace, "deps", "cache.txt"])) == "cached deps\n"
       assert File.read!(Path.join([second_workspace, "_build", "artifact.txt"])) == "compiled artifact\n"
-      refute File.exists?(Path.join([second_workspace, "tmp", "scratch.txt"]))
+      assert File.read!(Path.join([second_workspace, "tmp", "scratch.txt"])) == "remove me\n"
     after
       File.rm_rf(workspace_root)
     end
@@ -321,6 +358,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         "id" => "user-1"
       },
       "labels" => %{"nodes" => [%{"name" => "Backend"}]},
+      "attachments" => %{
+        "nodes" => [
+          %{
+            "title" => "GitHub #1502",
+            "subtitle" => "Source issue",
+            "url" => "https://github.com/h3ro-dev/NewRewards/issues/1502",
+            "sourceType" => "github"
+          }
+        ]
+      },
       "inverseRelations" => %{
         "nodes" => [
           %{
@@ -353,6 +400,307 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.state == "Todo"
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
+
+    assert issue.attachments == [
+             %{
+               title: "GitHub #1502",
+               subtitle: "Source issue",
+               url: "https://github.com/h3ro-dev/NewRewards/issues/1502",
+               source_type: "github"
+             }
+           ]
+  end
+
+  test "github label gate allows exactly linked open issue with required labels" do
+    issue = %Issue{
+      identifier: "UTL-1",
+      title: "Run source issue",
+      attachments: [%{url: "https://github.com/h3ro-dev/NewRewards/issues/1502"}]
+    }
+
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready"],
+      blocked_github_labels: ["do-not-agent", "owner:manual"]
+    }
+
+    view_fun = fn "h3ro-dev/NewRewards", 1502 ->
+      {:ok,
+       %{
+         "number" => 1502,
+         "state" => "OPEN",
+         "labels" => [%{"name" => "symphony-ready"}, %{"name" => "codex"}]
+       }}
+    end
+
+    assert {:ok, %{"number" => 1502}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, view_fun)
+  end
+
+  test "github label gate rejects missing and blocked labels before dispatch" do
+    issue = %Issue{
+      identifier: "UTL-2",
+      title: "Run source issue",
+      attachments: [%{url: "https://github.com/h3ro-dev/NewRewards/issues/1503"}]
+    }
+
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready"],
+      blocked_github_labels: ["owner:fourth-clone"]
+    }
+
+    missing_label_view = fn _repo, 1503 ->
+      {:ok, %{"number" => 1503, "state" => "OPEN", "labels" => [%{"name" => "codex"}]}}
+    end
+
+    assert {:error, {:missing_required_github_labels, ["symphony-ready"]}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, missing_label_view)
+
+    blocked_label_view = fn _repo, 1503 ->
+      {:ok,
+       %{
+         "number" => 1503,
+         "state" => "OPEN",
+         "labels" => [%{"name" => "symphony-ready"}, %{"name" => "owner:fourth-clone"}]
+       }}
+    end
+
+    assert {:error, {:blocked_github_labels_present, ["owner:fourth-clone"]}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, blocked_label_view)
+  end
+
+  test "github label gate requires one linked github issue" do
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready"],
+      blocked_github_labels: []
+    }
+
+    missing = %Issue{identifier: "UTL-3", title: "No source"}
+
+    assert {:error, :missing_github_issue_link} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(missing, tracker, fn _, _ -> flunk("unexpected") end)
+
+    multiple = %Issue{
+      identifier: "UTL-4",
+      title: "Two sources",
+      attachments: [
+        %{url: "https://github.com/h3ro-dev/NewRewards/issues/1502"},
+        %{url: "https://github.com/h3ro-dev/NewRewards/issues/1503"}
+      ]
+    }
+
+    assert {:error, {:multiple_github_issue_links, [1502, 1503]}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(multiple, tracker, fn _, _ -> flunk("unexpected") end)
+  end
+
+  test "github label gate can require a Linear attachment instead of text refs" do
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      require_github_attachment: true,
+      required_github_labels: ["symphony-ready"],
+      blocked_github_labels: []
+    }
+
+    issue = %Issue{
+      identifier: "UTL-5",
+      title: "Run #1502",
+      description: "Source https://github.com/h3ro-dev/NewRewards/issues/1502"
+    }
+
+    assert {:error, :missing_github_issue_attachment} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, fn _, _ -> flunk("unexpected") end)
+  end
+
+  test "github label gate covers disabled, malformed, and non-issue paths" do
+    refute SymphonyElixir.GitHubGate.enabled?(:not_a_tracker)
+    refute SymphonyElixir.GitHubGate.enabled?(%{github_repo: " ", required_github_labels: ["symphony-ready"]})
+    refute SymphonyElixir.GitHubGate.enabled?(%{github_repo: "h3ro-dev/NewRewards", required_github_labels: [" ", 123]})
+
+    assert {:ok, %{gate: :disabled}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(
+               %Issue{identifier: "UTL-6"},
+               %{github_repo: "h3ro-dev/NewRewards", required_github_labels: []},
+               fn _, _ -> flunk("unexpected") end
+             )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_github_repo: "h3ro-dev/NewRewards",
+      tracker_required_github_labels: ["symphony-ready"]
+    )
+
+    assert SymphonyElixir.GitHubGate.enabled?()
+    refute SymphonyElixir.GitHubGate.allowed?(:not_an_issue)
+
+    log =
+      capture_log(fn ->
+        refute SymphonyElixir.GitHubGate.allowed?(%Issue{identifier: "UTL-7", title: "No source"})
+      end)
+
+    assert log =~ "GitHub gate failed :missing_github_issue_link"
+  end
+
+  test "github label gate extracts text, attachment variants, and label shapes" do
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready", "owner:symphony"],
+      blocked_github_labels: ["do-not-agent"]
+    }
+
+    attachment_issue = %Issue{
+      identifier: "UTL-8",
+      title: "Attachment source",
+      attachments: [
+        %{"url" => "https://github.com/h3ro-dev/NewRewards/issues/1600"},
+        %{ignored: true}
+      ]
+    }
+
+    attachment_view = fn "h3ro-dev/NewRewards", 1600 ->
+      {:ok,
+       %{
+         "state" => "open",
+         "labels" => [
+           %{name: "symphony-ready"},
+           "owner:symphony",
+           %{unexpected: true}
+         ]
+       }}
+    end
+
+    assert {:ok, _github_issue} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(attachment_issue, tracker, attachment_view)
+
+    text_issue = %Issue{
+      identifier: "UTL-9",
+      title: "Text source #1601",
+      description: "Source https://github.com/h3ro-dev/NewRewards/issues/1601"
+    }
+
+    assert {:ok, _github_issue} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(text_issue, tracker, fn "h3ro-dev/NewRewards", 1601 ->
+               {:ok, %{"state" => "open", "labels" => [%{"name" => "symphony-ready"}, %{"name" => "owner:symphony"}]}}
+             end)
+
+    hash_issue = %Issue{
+      identifier: "UTL-10",
+      title: "Text source #1602",
+      attachments: nil
+    }
+
+    assert {:ok, _github_issue} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(hash_issue, tracker, fn "h3ro-dev/NewRewards", 1602 ->
+               {:ok, %{"state" => "open", "labels" => [%{"name" => "symphony-ready"}, %{"name" => "owner:symphony"}]}}
+             end)
+  end
+
+  test "github label gate prefers explicit source issue over related context links" do
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready", "owner:symphony"],
+      blocked_github_labels: []
+    }
+
+    issue = %Issue{
+      identifier: "UTL-10A",
+      title: "GH #1800: promoted issue",
+      description: """
+      <!-- symphony-source:h3ro-dev/NewRewards#1800 -->
+      ## Source GitHub Issue
+      https://github.com/h3ro-dev/NewRewards/issues/1800
+
+      ## Related Links
+      - https://github.com/h3ro-dev/NewRewards/issues/1801
+      - #1802
+      """
+    }
+
+    assert {:ok, %{"number" => 1800}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, fn "h3ro-dev/NewRewards", 1800 ->
+               {:ok,
+                %{
+                  "number" => 1800,
+                  "state" => "open",
+                  "labels" => [%{"name" => "symphony-ready"}, %{"name" => "owner:symphony"}]
+                }}
+             end)
+  end
+
+  test "github label gate reports missing state and gh cli outcomes" do
+    tracker = %{
+      github_repo: "h3ro-dev/NewRewards",
+      required_github_labels: ["symphony-ready"],
+      blocked_github_labels: []
+    }
+
+    issue = %Issue{
+      identifier: "UTL-11",
+      title: "Source",
+      description: "https://github.com/h3ro-dev/NewRewards/issues/1700"
+    }
+
+    assert {:error, :github_issue_missing_state} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, fn _, 1700 ->
+               {:ok, %{"labels" => [%{"name" => "symphony-ready"}]}}
+             end)
+
+    assert {:error, {:missing_required_github_labels, ["symphony-ready"]}} =
+             SymphonyElixir.GitHubGate.issue_allowed_for_test(issue, tracker, fn _, 1700 ->
+               {:ok, %{"state" => "open"}}
+             end)
+
+    fake_bin = Path.join(System.tmp_dir!(), "symphony-fake-gh-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(fake_bin)
+    fake_gh = Path.join(fake_bin, "gh")
+
+    File.write!(fake_gh, """
+    #!/bin/sh
+    case "$3" in
+      1701) printf '%s' '{"number":1701,"state":"OPEN","labels":[{"name":"symphony-ready"}]}' ;;
+      1702) printf '%s\\n' 'missing issue'; exit 1 ;;
+      1703) printf '%s' '{not-json' ;;
+      *) printf '%s\\n' 'unexpected issue'; exit 2 ;;
+    esac
+    """)
+
+    File.chmod!(fake_gh, 0o755)
+    previous_path = System.get_env("PATH") || ""
+    on_exit(fn -> System.put_env("PATH", previous_path) end)
+    System.put_env("PATH", fake_bin <> ":" <> previous_path)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_github_repo: "h3ro-dev/NewRewards",
+      tracker_required_github_labels: ["symphony-ready"]
+    )
+
+    assert {:ok, %{"number" => 1701}} =
+             SymphonyElixir.GitHubGate.issue_allowed?(%Issue{
+               identifier: "UTL-12",
+               title: "#1701"
+             })
+
+    assert {:error, {:gh_issue_view_failed, "missing issue"}} =
+             SymphonyElixir.GitHubGate.issue_allowed?(%Issue{
+               identifier: "UTL-13",
+               title: "#1702"
+             })
+
+    assert {:error, %Jason.DecodeError{}} =
+             SymphonyElixir.GitHubGate.issue_allowed?(%Issue{
+               identifier: "UTL-14",
+               title: "#1703"
+             })
+
+    System.put_env("PATH", fake_bin <> "/missing")
+
+    assert {:error, {:gh_issue_view_failed, message}} =
+             SymphonyElixir.GitHubGate.issue_allowed?(%Issue{
+               identifier: "UTL-15",
+               title: "#1701"
+             })
+
+    assert message =~ "enoent"
   end
 
   test "linear client marks explicitly unassigned issues as not routed to worker" do
@@ -742,6 +1090,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.api_key == nil
     assert config.tracker.project_slug == nil
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
+    assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
     assert config.codex.command == "codex app-server"
 
@@ -771,8 +1120,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.read_timeout_ms == 5_000
     assert config.codex.stall_timeout_ms == 300_000
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server --model gpt-5.3-codex")
-    assert Config.settings!().codex.command == "codex app-server --model gpt-5.3-codex"
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: "codex --config 'model=\"gpt-5.5\"' app-server"
+    )
+
+    assert Config.settings!().codex.command ==
+             "codex --config 'model=\"gpt-5.5\"' app-server"
 
     explicit_root =
       Path.join(
@@ -812,6 +1165,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "agent.max_concurrent_agents"
+
+    write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 0)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "worker.max_concurrent_agents_per_host"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_turn_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -932,7 +1289,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     config = Config.settings!()
     assert config.tracker.api_key == "env:#{api_key_env_var}"
-    assert config.workspace.root == Path.expand("env:#{workspace_env_var}")
+    assert config.workspace.root == "env:#{workspace_env_var}"
   end
 
   test "config supports per-state max concurrent agent overrides" do
@@ -955,6 +1312,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.max_concurrent_agents_for_state("In Review") == 2
     assert Config.max_concurrent_agents_for_state("Closed") == 10
     assert Config.max_concurrent_agents_for_state(:not_a_string) == 10
+
+    write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 2)
+    assert :ok = Config.validate!()
+    assert Config.settings!().worker.max_concurrent_agents_per_host == 2
+  end
+
+  test "config supports github label gate settings" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_github_repo: "h3ro-dev/NewRewards",
+      tracker_require_github_attachment: true,
+      tracker_required_github_labels: ["symphony-ready"],
+      tracker_blocked_github_labels: ["do-not-agent", "owner:manual"]
+    )
+
+    assert Config.settings!().tracker.github_repo == "h3ro-dev/NewRewards"
+    assert Config.settings!().tracker.require_github_attachment == true
+    assert Config.settings!().tracker.required_github_labels == ["symphony-ready"]
+    assert Config.settings!().tracker.blocked_github_labels == ["do-not-agent", "owner:manual"]
+    assert :ok = Config.validate!()
+  end
+
+  test "config rejects github label gate without repository" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_required_github_labels: ["symphony-ready"]
+    )
+
+    assert {:error, :missing_github_repo_for_label_gate} = Config.validate!()
   end
 
   test "schema helpers cover custom type and state limit validation" do
@@ -1021,7 +1405,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              })
 
     assert settings.tracker.api_key == nil
-    assert settings.workspace.root == Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
+    assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
 
     assert settings.codex.approval_policy == %{
              "reject" => %{"sandbox_approval" => true}
@@ -1034,7 +1418,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              })
 
     assert settings.tracker.api_key == "fallback-linear-token"
-    assert settings.workspace.root == Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
+    assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
   end
 
   test "schema resolves sandbox policies from explicit and default workspaces" do
@@ -1066,6 +1450,37 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            ) == %{
              "type" => "workspaceWrite",
              "writableRoots" => [Path.expand("/tmp/workspace")],
+             "readOnlyAccess" => %{"type" => "fullAccess"},
+             "networkAccess" => false,
+             "excludeTmpdirEnvVar" => false,
+             "excludeSlashTmp" => false
+           }
+  end
+
+  test "schema keeps workspace roots raw while sandbox helpers expand only for local use" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               workspace: %{root: "~/.symphony-workspaces"},
+               codex: %{}
+             })
+
+    assert settings.workspace.root == "~/.symphony-workspaces"
+
+    assert Schema.resolve_turn_sandbox_policy(settings) == %{
+             "type" => "workspaceWrite",
+             "writableRoots" => [Path.expand("~/.symphony-workspaces")],
+             "readOnlyAccess" => %{"type" => "fullAccess"},
+             "networkAccess" => false,
+             "excludeTmpdirEnvVar" => false,
+             "excludeSlashTmp" => false
+           }
+
+    assert {:ok, remote_policy} =
+             Schema.resolve_runtime_turn_sandbox_policy(settings, nil, remote: true)
+
+    assert remote_policy == %{
+             "type" => "workspaceWrite",
+             "writableRoots" => ["~/.symphony-workspaces"],
              "readOnlyAccess" => %{"type" => "fullAccess"},
              "networkAccess" => false,
              "excludeTmpdirEnvVar" => false,
@@ -1154,6 +1569,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert default_policy["type"] == "workspaceWrite"
       assert default_policy["writableRoots"] == [canonical_workspace_root]
 
+      assert {:ok, blank_workspace_policy} =
+               Schema.resolve_runtime_turn_sandbox_policy(settings, "")
+
+      assert blank_workspace_policy == default_policy
+
       read_only_settings = %{
         settings
         | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => true}}
@@ -1182,5 +1602,76 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
     assert Config.workflow_prompt() == workflow_prompt
+  end
+
+  test "remote workspace lifecycle uses ssh host aliases from worker config" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_root = "~/.symphony-remote-workspaces"
+      workspace_path = "/remote/home/.symphony-remote-workspaces/MT-SSH-WS"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+
+      case "$*" in
+        *"__SYMPHONY_WORKSPACE__"*)
+          printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
+          ;;
+      esac
+
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        worker_ssh_hosts: ["worker-01:2200"],
+        hook_before_run: "echo before-run",
+        hook_after_run: "echo after-run",
+        hook_before_remove: "echo before-remove"
+      )
+
+      assert Config.settings!().worker.ssh_hosts == ["worker-01:2200"]
+      assert Config.settings!().workspace.root == workspace_root
+      assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WS", "worker-01:2200")
+      assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
+      assert :ok = Workspace.run_after_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
+      assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", "worker-01:2200")
+
+      trace = File.read!(trace_file)
+      assert trace =~ "-p 2200 worker-01 bash -lc"
+      assert trace =~ "__SYMPHONY_WORKSPACE__"
+      assert trace =~ "~/.symphony-remote-workspaces/MT-SSH-WS"
+      assert trace =~ "${workspace#~/}"
+      assert trace =~ "echo before-run"
+      assert trace =~ "echo after-run"
+      assert trace =~ "echo before-remove"
+      assert trace =~ "rm -rf"
+      assert trace =~ workspace_path
+    after
+      File.rm_rf(test_root)
+    end
   end
 end

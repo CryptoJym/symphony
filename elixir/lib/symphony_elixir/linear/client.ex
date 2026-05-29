@@ -31,6 +31,14 @@ defmodule SymphonyElixir.Linear.Client do
             name
           }
         }
+        attachments(first: $relationFirst) {
+          nodes {
+            title
+            subtitle
+            url
+            sourceType
+          }
+        }
         inverseRelations(first: $relationFirst) {
           nodes {
             type
@@ -76,6 +84,14 @@ defmodule SymphonyElixir.Linear.Client do
             name
           }
         }
+        attachments(first: $relationFirst) {
+          nodes {
+            title
+            subtitle
+            url
+            sourceType
+          }
+        }
         inverseRelations(first: $relationFirst) {
           nodes {
             type
@@ -116,8 +132,9 @@ defmodule SymphonyElixir.Linear.Client do
         {:error, :missing_linear_project_slug}
 
       true ->
-        with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_by_states(project_slug, tracker.active_states, assignee_filter)
+        with {:ok, assignee_filter} <- routing_assignee_filter(),
+             {:ok, issues} <- do_fetch_by_states(project_slug, tracker.active_states, assignee_filter) do
+          {:ok, filter_issues_for_config(issues)}
         end
     end
   end
@@ -140,7 +157,9 @@ defmodule SymphonyElixir.Linear.Client do
           {:error, :missing_linear_project_slug}
 
         true ->
-          do_fetch_by_states(project_slug, normalized_states, nil)
+          with {:ok, issues} <- do_fetch_by_states(project_slug, normalized_states, nil) do
+            {:ok, filter_issues_for_config(issues)}
+          end
       end
     end
   end
@@ -221,6 +240,12 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
+  @spec filter_issues_for_test([Issue.t()], [String.t()]) :: [Issue.t()]
+  def filter_issues_for_test(issues, identifiers) when is_list(issues) and is_list(identifiers) do
+    filter_issues_by_identifiers(issues, identifiers)
+  end
+
+  @doc false
   @spec fetch_issue_states_by_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
@@ -270,6 +295,42 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp finalize_paginated_issues(acc_issues) when is_list(acc_issues), do: Enum.reverse(acc_issues)
+
+  defp filter_issues_for_config(issues) when is_list(issues) do
+    filter_issues_by_identifiers(issues, Config.settings!().tracker.issue_identifiers || [])
+  end
+
+  defp filter_issues_by_identifiers(issues, identifiers) when is_list(issues) and is_list(identifiers) do
+    allowed =
+      identifiers
+      |> Enum.map(&normalize_issue_identifier/1)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    if MapSet.size(allowed) == 0 do
+      issues
+    else
+      Enum.filter(issues, fn
+        %Issue{id: id, identifier: identifier} ->
+          MapSet.member?(allowed, normalize_issue_identifier(identifier)) ||
+            MapSet.member?(allowed, normalize_issue_identifier(id))
+
+        _ ->
+          false
+      end)
+    end
+  end
+
+  defp normalize_issue_identifier(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> case do
+      "" -> nil
+      trimmed -> String.upcase(trimmed)
+    end
+  end
+
+  defp normalize_issue_identifier(_value), do: nil
 
   defp do_fetch_issue_states(ids, assignee_filter) do
     do_fetch_issue_states(ids, assignee_filter, &graphql/2)
@@ -459,6 +520,7 @@ defmodule SymphonyElixir.Linear.Client do
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
       blocked_by: extract_blockers(issue),
+      attachments: extract_attachments(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),
@@ -546,6 +608,21 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_labels(_), do: []
+
+  defp extract_attachments(%{"attachments" => %{"nodes" => attachments}}) when is_list(attachments) do
+    attachments
+    |> Enum.filter(&is_map/1)
+    |> Enum.map(fn attachment ->
+      %{
+        title: attachment["title"],
+        subtitle: attachment["subtitle"],
+        url: attachment["url"],
+        source_type: attachment["sourceType"]
+      }
+    end)
+  end
+
+  defp extract_attachments(_), do: []
 
   defp extract_blockers(%{"inverseRelations" => %{"nodes" => inverse_relations}})
        when is_list(inverse_relations) do

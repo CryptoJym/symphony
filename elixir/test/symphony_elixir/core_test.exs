@@ -16,6 +16,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.active_states == ["Todo", "In Progress"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
+    assert config.tracker.issue_identifiers == []
     assert config.agent.max_turns == 20
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
@@ -88,6 +89,20 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
+  test "tracker issue_identifiers restrict Linear dispatch candidates" do
+    issue_a = %Issue{id: "issue-a", identifier: "MT-1", state: "Todo"}
+    issue_b = %Issue{id: "issue-b", identifier: "MT-2", state: "Todo"}
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_issue_identifiers: ["mt-2"],
+      tracker_project_slug: "project"
+    )
+
+    assert Config.settings!().tracker.issue_identifiers == ["mt-2"]
+    assert Client.filter_issues_for_test([issue_a, issue_b], Config.settings!().tracker.issue_identifiers) == [issue_b]
+    assert Client.filter_issues_for_test([issue_a, issue_b], []) == [issue_a, issue_b]
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
@@ -108,7 +123,8 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+    assert Map.get(hooks, "before_remove") =~ "gh pr close"
+    assert Map.get(hooks, "before_remove") =~ "entered a terminal state without merge"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -543,6 +559,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    scheduled_from_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -551,7 +568,7 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_scheduled_from(due_at_ms, scheduled_from_ms, 900, 1_300)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -584,6 +601,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    scheduled_from_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -591,7 +609,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_scheduled_from(due_at_ms, scheduled_from_ms, 39_500, 41_000)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -623,6 +641,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    scheduled_from_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -630,7 +649,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_due_scheduled_from(due_at_ms, scheduled_from_ms, 9_500, 11_000)
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -703,11 +722,58 @@ defmodule SymphonyElixir.CoreTest do
     assert {:noreply, ^coalesced_state} = Orchestrator.handle_info({:tick, stale_tick_token}, coalesced_state)
   end
 
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+  test "select_worker_host_for_test skips full ssh hosts under the shared per-host cap" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a", "worker-b"],
+      worker_max_concurrent_agents_per_host: 1
+    )
 
-    assert remaining_ms >= min_remaining_ms
-    assert remaining_ms <= max_remaining_ms
+    state = %Orchestrator.State{
+      running: %{
+        "issue-1" => %{worker_host: "worker-a"}
+      }
+    }
+
+    assert Orchestrator.select_worker_host_for_test(state, nil) == "worker-b"
+  end
+
+  test "select_worker_host_for_test returns no_worker_capacity when every ssh host is full" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a", "worker-b"],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    state = %Orchestrator.State{
+      running: %{
+        "issue-1" => %{worker_host: "worker-a"},
+        "issue-2" => %{worker_host: "worker-b"}
+      }
+    }
+
+    assert Orchestrator.select_worker_host_for_test(state, nil) == :no_worker_capacity
+  end
+
+  test "select_worker_host_for_test keeps the preferred ssh host when it still has capacity" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a", "worker-b"],
+      worker_max_concurrent_agents_per_host: 2
+    )
+
+    state = %Orchestrator.State{
+      running: %{
+        "issue-1" => %{worker_host: "worker-a"},
+        "issue-2" => %{worker_host: "worker-b"}
+      }
+    }
+
+    assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
+  end
+
+  defp assert_due_scheduled_from(due_at_ms, scheduled_from_ms, min_delay_ms, max_delay_ms) do
+    delay_ms = due_at_ms - scheduled_from_ms
+
+    assert delay_ms >= min_delay_ms
+    assert delay_ms <= max_delay_ms
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
@@ -737,6 +803,36 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket S-1 Refactor backend request path"
     assert prompt =~ "labels=backend"
     assert prompt =~ "attempt=3"
+  end
+
+  test "prompt builder prefers state-specific prompt when configured" do
+    File.write!(
+      Workflow.workflow_file_path(),
+      """
+      ---
+      prompts:
+        in_progress: |
+          Compact state prompt for {{ issue.identifier }} attempt={{ attempt }}
+      ---
+      Full workflow prompt for {{ issue.identifier }}
+      """
+    )
+
+    if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+
+    issue = %Issue{
+      identifier: "MT-900",
+      title: "Use compact prompt",
+      description: "The first turn should not load the generic prompt body.",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-900",
+      labels: ["prompt"]
+    }
+
+    prompt = PromptBuilder.build_prompt(issue, attempt: 2)
+
+    assert prompt =~ "Compact state prompt for MT-900 attempt=2"
+    refute prompt =~ "Full workflow prompt"
   end
 
   test "prompt builder renders issue datetime fields without crashing" do
@@ -1112,6 +1208,76 @@ defmodule SymphonyElixir.CoreTest do
                      500
 
       assert session_id == "thread-live-turn-live"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner surfaces ssh startup failures instead of silently hopping hosts" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-single-host-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+
+      case "$*" in
+        *worker-a*"__SYMPHONY_WORKSPACE__"*)
+          printf '%s\\n' 'worker-a prepare failed' >&2
+          exit 75
+          ;;
+        *worker-b*"__SYMPHONY_WORKSPACE__"*)
+          printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '/remote/home/.symphony-remote-workspaces/MT-SSH-FAILOVER'
+          exit 0
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "~/.symphony-remote-workspaces",
+        worker_ssh_hosts: ["worker-a", "worker-b"]
+      )
+
+      issue = %Issue{
+        id: "issue-ssh-failover",
+        identifier: "MT-SSH-FAILOVER",
+        title: "Do not fail over within a single worker run",
+        description: "Surface the startup failure to the orchestrator",
+        state: "In Progress"
+      }
+
+      assert_raise RuntimeError, ~r/workspace_prepare_failed/, fn ->
+        AgentRunner.run(issue, nil, worker_host: "worker-a")
+      end
+
+      trace = File.read!(trace_file)
+      assert trace =~ "worker-a bash -lc"
+      refute trace =~ "worker-b bash -lc"
     after
       File.rm_rf(test_root)
     end
@@ -1549,7 +1715,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_command: "#{codex_binary} --model gpt-5.3-codex app-server"
+        codex_command: "#{codex_binary} --config 'model=\"gpt-5.5\"' app-server"
       )
 
       issue = %Issue{
@@ -1568,7 +1734,7 @@ defmodule SymphonyElixir.CoreTest do
       lines = String.split(trace, "\n", trim: true)
 
       assert argv_line = Enum.find(lines, fn line -> String.starts_with?(line, "ARGV:") end)
-      assert String.contains?(argv_line, "--model gpt-5.3-codex app-server")
+      assert String.contains?(argv_line, "--config model=\"gpt-5.5\" app-server")
       refute String.contains?(argv_line, "--ask-for-approval never")
       refute String.contains?(argv_line, "--sandbox danger-full-access")
     after

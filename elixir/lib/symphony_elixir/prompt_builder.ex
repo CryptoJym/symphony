@@ -11,7 +11,7 @@ defmodule SymphonyElixir.PromptBuilder do
   def build_prompt(issue, opts \\ []) do
     template =
       Workflow.current()
-      |> prompt_template!()
+      |> prompt_template!(issue)
       |> parse_template!()
 
     template
@@ -25,11 +25,68 @@ defmodule SymphonyElixir.PromptBuilder do
     |> IO.iodata_to_binary()
   end
 
-  defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
+  defp prompt_template!({:ok, workflow}, issue) do
+    state_prompt(workflow[:config] || %{}, issue) || default_prompt(workflow[:prompt_template])
+  end
 
-  defp prompt_template!({:error, reason}) do
+  defp prompt_template!({:error, reason}, _issue) do
     raise RuntimeError, "workflow_unavailable: #{inspect(reason)}"
   end
+
+  defp state_prompt(config, issue) when is_map(config) do
+    prompts =
+      config
+      |> map_get("prompts")
+      |> fallback_map_get(config, "prompt_templates")
+      |> fallback_map_get(config, "state_prompts")
+
+    with %{} <- prompts,
+         state when is_binary(state) and state != "" <- normalize_state(issue_state(issue)),
+         prompt when is_binary(prompt) <- find_state_prompt(prompts, state),
+         true <- String.trim(prompt) != "" do
+      prompt
+    else
+      _ -> nil
+    end
+  end
+
+  defp state_prompt(_config, _issue), do: nil
+
+  defp fallback_map_get(nil, config, key), do: map_get(config, key)
+  defp fallback_map_get(value, _config, _key), do: value
+
+  defp find_state_prompt(prompts, wanted_state) when is_map(prompts) do
+    Enum.find_value(prompts, fn {state_name, raw_prompt} ->
+      if normalize_state(to_string(state_name)) == wanted_state do
+        prompt_value(raw_prompt)
+      end
+    end)
+  end
+
+  defp prompt_value(prompt) when is_binary(prompt), do: prompt
+  defp prompt_value(%{} = prompt), do: map_get(prompt, "prompt") || map_get(prompt, "template")
+  defp prompt_value(_prompt), do: nil
+
+  defp issue_state(%{state: state}), do: state
+  defp issue_state(%{"state" => state}), do: state
+  defp issue_state(_issue), do: nil
+
+  defp normalize_state(state) when is_binary(state) do
+    state
+    |> String.trim()
+    |> String.downcase()
+    |> String.replace(~r/[\s_-]+/, " ")
+  end
+
+  defp normalize_state(_state), do: ""
+
+  defp map_get(map, key) when is_map(map) do
+    Map.get(map, key) || Map.get(map, String.to_atom(key))
+  rescue
+    ArgumentError -> Map.get(map, key)
+  end
+
+  defp map_get(_map, _key), do: nil
 
   defp parse_template!(prompt) when is_binary(prompt) do
     Solid.parse!(prompt)

@@ -98,11 +98,12 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @spec codex_runtime_settings(Path.t() | nil) :: {:ok, codex_runtime_settings()} | {:error, term()}
-  def codex_runtime_settings(workspace \\ nil) do
+  @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
+          {:ok, codex_runtime_settings()} | {:error, term()}
+  def codex_runtime_settings(workspace \\ nil, opts \\ []) do
     with {:ok, settings} <- settings() do
       with {:ok, turn_sandbox_policy} <-
-             Schema.resolve_runtime_turn_sandbox_policy(settings, workspace) do
+             Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts) do
         {:ok,
          %{
            approval_policy: settings.codex.approval_policy,
@@ -114,23 +115,33 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_semantics(settings) do
+    case validate_tracker_kind(settings.tracker) do
+      :ok -> validate_linear_tracker(settings.tracker)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp validate_tracker_kind(%{kind: nil}), do: {:error, :missing_tracker_kind}
+  defp validate_tracker_kind(%{kind: kind}) when kind in ["linear", "memory"], do: :ok
+  defp validate_tracker_kind(%{kind: kind}), do: {:error, {:unsupported_tracker_kind, kind}}
+
+  defp validate_linear_tracker(%{kind: "linear"} = tracker) do
     cond do
-      is_nil(settings.tracker.kind) ->
-        {:error, :missing_tracker_kind}
-
-      settings.tracker.kind not in ["linear", "memory"] ->
-        {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
-
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
+      not is_binary(tracker.api_key) ->
         {:error, :missing_linear_api_token}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
+      not is_binary(tracker.project_slug) ->
         {:error, :missing_linear_project_slug}
+
+      tracker.required_github_labels != [] and not is_binary(tracker.github_repo) ->
+        {:error, :missing_github_repo_for_label_gate}
 
       true ->
         :ok
     end
   end
+
+  defp validate_linear_tracker(_tracker), do: :ok
 
   defp format_config_error(reason) do
     case reason do
@@ -145,6 +156,9 @@ defmodule SymphonyElixir.Config do
 
       :workflow_front_matter_not_a_map ->
         "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
+
+      :missing_github_repo_for_label_gate ->
+        "GitHub label gate requires tracker.github_repo when tracker.required_github_labels is set"
 
       other ->
         "Invalid WORKFLOW.md config: #{inspect(other)}"
