@@ -743,6 +743,36 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "attempt=3"
   end
 
+  test "prompt builder prefers state-specific prompt when configured" do
+    File.write!(
+      Workflow.workflow_file_path(),
+      """
+      ---
+      prompts:
+        in_progress: |
+          Compact state prompt for {{ issue.identifier }} attempt={{ attempt }}
+      ---
+      Full workflow prompt for {{ issue.identifier }}
+      """
+    )
+
+    if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+
+    issue = %Issue{
+      identifier: "MT-900",
+      title: "Use compact prompt",
+      description: "The first turn should not load the generic prompt body.",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-900",
+      labels: ["prompt"]
+    }
+
+    prompt = PromptBuilder.build_prompt(issue, attempt: 2)
+
+    assert prompt =~ "Compact state prompt for MT-900 attempt=2"
+    refute prompt =~ "Full workflow prompt"
+  end
+
   test "prompt builder renders issue datetime fields without crashing" do
     workflow_prompt = "Ticket {{ issue.identifier }} created={{ issue.created_at }} updated={{ issue.updated_at }}"
 

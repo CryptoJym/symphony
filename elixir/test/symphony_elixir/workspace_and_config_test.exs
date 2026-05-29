@@ -56,6 +56,43 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Path.basename(first_workspace) == "MT_Det"
   end
 
+  test "workspace writes issue manifest and exposes issue metadata to hooks" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-issue-context-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "printf '%s|%s|%s|%s|%s' \"$SYMPHONY_ISSUE_ID\" \"$SYMPHONY_ISSUE_IDENTIFIER\" \"$SYMPHONY_ISSUE_TITLE\" \"$SYMPHONY_ISSUE_STATE\" \"$SYMPHONY_ISSUE_URL\" > hook-env.txt"
+      )
+
+      issue = %Issue{
+        id: "issue-42",
+        identifier: "MT-42",
+        title: "Expose hook context",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-42"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert File.read!(Path.join(workspace, "hook-env.txt")) ==
+               "issue-42|MT-42|Expose hook context|In Progress|https://example.org/issues/MT-42"
+
+      manifest = Path.join([workspace, ".symphony", "issue.json"]) |> File.read!() |> Jason.decode!()
+
+      assert manifest["issue_id"] == "issue-42"
+      assert manifest["issue_identifier"] == "MT-42"
+      assert manifest["title"] == "Expose hook context"
+      assert manifest["state"] == "In Progress"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace reuses existing issue directory without deleting local changes" do
     workspace_root =
       Path.join(

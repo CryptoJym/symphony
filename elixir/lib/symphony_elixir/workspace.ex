@@ -18,7 +18,8 @@ defmodule SymphonyElixir.Workspace do
       with {:ok, workspace} <- workspace_path_for_issue(safe_id),
            :ok <- validate_workspace_path(workspace),
            {:ok, created?} <- ensure_workspace(workspace),
-           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?) do
+           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?),
+           :ok <- write_issue_manifest(workspace, issue_or_identifier, issue_context) do
         {:ok, workspace}
       end
     rescue
@@ -180,7 +181,11 @@ defmodule SymphonyElixir.Workspace do
 
     task =
       Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+        System.cmd("sh", ["-lc", command],
+          cd: workspace,
+          stderr_to_stdout: true,
+          env: hook_env(issue_context)
+        )
       end)
 
     case Task.yield(task, timeout_ms) do
@@ -220,6 +225,58 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  defp write_issue_manifest(workspace, %{} = issue_or_identifier, issue_context) do
+    symphony_dir = Path.join(workspace, ".symphony")
+    manifest_path = Path.join(symphony_dir, "issue.json")
+
+    manifest =
+      issue_or_identifier
+      |> issue_manifest(issue_context)
+      |> json_safe()
+
+    with :ok <- File.mkdir_p(symphony_dir),
+         {:ok, encoded} <- Jason.encode(manifest, pretty: true),
+         :ok <- File.write(manifest_path, encoded <> "\n") do
+      :ok
+    else
+      {:error, reason} -> {:error, {:issue_manifest_write_failed, reason}}
+    end
+  end
+
+  defp write_issue_manifest(_workspace, _issue_or_identifier, _issue_context), do: :ok
+
+  defp issue_manifest(%_{} = issue, issue_context) do
+    issue
+    |> Map.from_struct()
+    |> Map.merge(issue_context)
+  end
+
+  defp issue_manifest(%{} = issue, issue_context), do: Map.merge(issue, issue_context)
+  defp issue_manifest(_issue_or_identifier, issue_context), do: issue_context
+
+  defp hook_env(issue_context) do
+    [
+      {"SYMPHONY_ISSUE_ID", issue_context.issue_id},
+      {"SYMPHONY_ISSUE_IDENTIFIER", issue_context.issue_identifier},
+      {"SYMPHONY_ISSUE_TITLE", Map.get(issue_context, :issue_title)},
+      {"SYMPHONY_ISSUE_STATE", Map.get(issue_context, :issue_state)},
+      {"SYMPHONY_ISSUE_URL", Map.get(issue_context, :issue_url)}
+    ]
+    |> Enum.map(fn {key, value} -> {key, env_value(value)} end)
+  end
+
+  defp env_value(nil), do: ""
+  defp env_value(value), do: to_string(value)
+
+  defp json_safe(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  defp json_safe(%NaiveDateTime{} = value), do: NaiveDateTime.to_iso8601(value)
+  defp json_safe(%Date{} = value), do: Date.to_iso8601(value)
+  defp json_safe(%Time{} = value), do: Time.to_iso8601(value)
+  defp json_safe(%_{} = value), do: value |> Map.from_struct() |> json_safe()
+  defp json_safe(value) when is_map(value), do: Map.new(value, fn {key, nested} -> {to_string(key), json_safe(nested)} end)
+  defp json_safe(value) when is_list(value), do: Enum.map(value, &json_safe/1)
+  defp json_safe(value), do: value
+
   defp validate_workspace_path(workspace) when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)
     expanded_root = Path.expand(Config.settings!().workspace.root)
@@ -248,24 +305,33 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp issue_context(%{id: issue_id, identifier: identifier}) do
+  defp issue_context(%{id: issue_id, identifier: identifier} = issue) do
     %{
       issue_id: issue_id,
-      issue_identifier: identifier || "issue"
+      issue_identifier: identifier || "issue",
+      issue_title: Map.get(issue, :title),
+      issue_state: Map.get(issue, :state),
+      issue_url: Map.get(issue, :url)
     }
   end
 
   defp issue_context(identifier) when is_binary(identifier) do
     %{
       issue_id: nil,
-      issue_identifier: identifier
+      issue_identifier: identifier,
+      issue_title: nil,
+      issue_state: nil,
+      issue_url: nil
     }
   end
 
   defp issue_context(_identifier) do
     %{
       issue_id: nil,
-      issue_identifier: "issue"
+      issue_identifier: "issue",
+      issue_title: nil,
+      issue_state: nil,
+      issue_url: nil
     }
   end
 
