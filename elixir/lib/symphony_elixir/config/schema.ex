@@ -50,6 +50,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:api_key, :string)
       field(:project_slug, :string)
       field(:assignee, :string)
+      field(:issue_identifiers, {:array, :string}, default: [])
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
       field(:github_repo, :string)
@@ -69,6 +70,7 @@ defmodule SymphonyElixir.Config.Schema do
           :api_key,
           :project_slug,
           :assignee,
+          :issue_identifiers,
           :active_states,
           :terminal_states,
           :github_repo,

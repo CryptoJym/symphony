@@ -16,6 +16,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.active_states == ["Todo", "In Progress"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
+    assert config.tracker.issue_identifiers == []
     assert config.agent.max_turns == 20
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
@@ -86,6 +87,20 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+  end
+
+  test "tracker issue_identifiers restrict Linear dispatch candidates" do
+    issue_a = %Issue{id: "issue-a", identifier: "MT-1", state: "Todo"}
+    issue_b = %Issue{id: "issue-b", identifier: "MT-2", state: "Todo"}
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_issue_identifiers: ["mt-2"],
+      tracker_project_slug: "project"
+    )
+
+    assert Config.settings!().tracker.issue_identifiers == ["mt-2"]
+    assert Client.filter_issues_for_test([issue_a, issue_b], Config.settings!().tracker.issue_identifiers) == [issue_b]
+    assert Client.filter_issues_for_test([issue_a, issue_b], []) == [issue_a, issue_b]
   end
 
   test "current WORKFLOW.md file is valid and complete" do
