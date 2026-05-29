@@ -26,6 +26,11 @@ skills can make raw Linear GraphQL calls.
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
+If Codex reports that operator input, approval, or MCP elicitation is required, Symphony keeps the
+issue claimed and exposes it as blocked in the runtime state, JSON API, and dashboard. Blocked
+entries are in memory only; restarting the orchestrator clears that blocked map, so any still-active
+Linear issue can become a dispatch candidate again after restart.
+
 ## How to use it
 
 1. Make sure your codebase is set up to work well with agents: see
@@ -155,7 +160,7 @@ hooks:
   after_create: |
     git clone --depth 1 "$SOURCE_REPO_URL" .
 codex:
-  command: "$CODEX_BIN app-server --model gpt-5.3-codex"
+  command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
 ```
 
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
@@ -198,12 +203,23 @@ make e2e
 Optional environment variables:
 
 - `SYMPHONY_LIVE_LINEAR_TEAM_KEY` defaults to `SYME2E`
-- `SYMPHONY_LIVE_CODEX_COMMAND` defaults to `codex app-server`
+- `SYMPHONY_LIVE_SSH_WORKER_HOSTS` uses those SSH hosts when set, as a comma-separated list
 
-The live test creates a temporary Linear project and issue, writes a temporary `WORKFLOW.md`,
-runs a real agent turn, verifies the workspace side effect, requires Codex to comment on and close
-the Linear issue, then marks the project completed so the run remains visible in Linear.
-`make e2e` fails fast with a clear error if `LINEAR_API_KEY` is unset.
+`make e2e` runs two live scenarios:
+- one with a local worker
+- one with SSH workers
+
+If `SYMPHONY_LIVE_SSH_WORKER_HOSTS` is unset, the SSH scenario uses `docker compose` to start two
+disposable SSH workers on `localhost:<port>`. The live test generates a temporary SSH keypair,
+mounts the host `~/.codex/auth.json` into each worker, verifies that Symphony can talk to them
+over real SSH, then runs the same orchestration flow against those worker addresses. This keeps
+the transport representative without depending on long-lived external machines.
+
+Set `SYMPHONY_LIVE_SSH_WORKER_HOSTS` if you want `make e2e` to target real SSH hosts instead.
+
+The live test creates a temporary Linear project and issue, writes a temporary `WORKFLOW.md`, runs
+a real agent turn, verifies the workspace side effect, requires Codex to comment on and close the
+Linear issue, then marks the project completed so the run remains visible in Linear.
 
 ## FAQ
 
